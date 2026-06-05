@@ -2,7 +2,8 @@ const dotenv = require('dotenv');
 const { execSync } = require('child_process');
 const { existsSync } = require('fs');
 
-dotenv.config();
+// override: false = variáveis do ambiente (Render/Railway) têm prioridade sobre .env
+dotenv.config({ override: false });
 
 const { DATABASE_PROVIDER } = process.env;
 const databaseProviderDefault = DATABASE_PROVIDER ?? 'postgresql';
@@ -11,42 +12,72 @@ if (!DATABASE_PROVIDER) {
   console.warn(`DATABASE_PROVIDER is not set in the .env file, using default: ${databaseProviderDefault}`);
 }
 
-// Função para determinar qual pasta de migrations usar
-// Função para determinar qual pasta de migrations usar
+// Mapeia DATABASE_URL -> DATABASE_CONNECTION_URI se necessário
+if (process.env.DATABASE_URL && !process.env.DATABASE_CONNECTION_URI) {
+  process.env.DATABASE_CONNECTION_URI = process.env.DATABASE_URL;
+}
+
 function getMigrationsFolder(provider) {
   switch (provider) {
     case 'psql_bouncer':
-      return 'postgresql-migrations'; // psql_bouncer usa as migrations do postgresql
+      return './prisma/psql_bouncer-migrations';
+    case 'postgresql':
     default:
-      return `${provider}-migrations`;
+      return './prisma/postgresql-migrations';
   }
 }
 
-const migrationsFolder = getMigrationsFolder(databaseProviderDefault);
+function getSchemaFile(provider) {
+  switch (provider) {
+    case 'psql_bouncer':
+      return './prisma/psql_bouncer-schema.prisma';
+    case 'postgresql':
+    default:
+      return './prisma/postgresql-schema.prisma';
+  }
+}
 
-let command = process.argv
-  .slice(2)
-  .join(' ')
-  .replace(/DATABASE_PROVIDER/g, databaseProviderDefault);
+const provider = databaseProviderDefault;
+const migrationsFolder = getMigrationsFolder(provider);
+const schemaFile = getSchemaFile(provider);
 
-// Substituir referências à pasta de migrations pela pasta correta
-const migrationsPattern = new RegExp(`${databaseProviderDefault}-migrations`, 'g');
-command = command.replace(migrationsPattern, migrationsFolder);
+if (!existsSync(migrationsFolder)) {
+  console.error(`Migrations folder not found: ${migrationsFolder}`);
+  process.exit(1);
+}
 
-if (command.includes('rmdir') && existsSync('prisma\\migrations')) {
+const command = process.argv[2];
+
+if (command) {
   try {
-    execSync('rmdir /S /Q prisma\\migrations', { stdio: 'inherit' });
+    const resolvedCommand = command
+      .replace('DATABASE_PROVIDER', provider)
+      .replace('./prisma/migrations', migrationsFolder)
+      .replace('./prisma/DATABASE_PROVIDER-schema.prisma', schemaFile);
+    
+    console.log(`Running: ${resolvedCommand}`);
+    execSync(resolvedCommand, { 
+      stdio: 'inherit',
+      env: {
+        ...process.env,
+        DATABASE_CONNECTION_URI: process.env.DATABASE_CONNECTION_URI || process.env.DATABASE_URL,
+      }
+    });
   } catch (error) {
-    console.error(`Error removing directory: prisma\\migrations`);
+    console.error('Error executing command:', error.message);
     process.exit(1);
   }
-} else if (command.includes('rmdir')) {
-  console.warn(`Directory 'prisma\\migrations' does not exist, skipping removal.`);
-}
-
-try {
-  execSync(command, { stdio: 'inherit' });
-} catch (error) {
-  console.error(`Error executing command: ${command}`);
-  process.exit(1);
+} else {
+  // Start the application
+  try {
+    execSync('node dist/main.js', { 
+      stdio: 'inherit',
+      env: {
+        ...process.env,
+        DATABASE_CONNECTION_URI: process.env.DATABASE_CONNECTION_URI || process.env.DATABASE_URL,
+      }
+    });
+  } catch (error) {
+    process.exit(1);
+  }
 }
